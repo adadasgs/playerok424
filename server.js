@@ -54,7 +54,7 @@ app.post('/api/deals',auth,(q,s)=>{
  const link=`${APP_URL}/?join=${token}`;
  if(mode==='auto'){
   const dest=found?.telegram_id||(/^\d+$/.test(target)?target:null);
-  if(dest)notify(dest,`🤝 Вас приглашают в сделку Playerok Garant\nОт: @${q.tg.username||q.tg.id}\nТовар: ${title}\nСсылка: ${item}\nСумма: ${amount} ${currency}\n\nНажмите, чтобы открыть приглашение: ${link}`);
+  if(dest&&bot)bot.telegram.sendMessage(dest,`🤝 Вас приглашают в сделку Playerok Garant\nОт: @${q.tg.username||q.tg.id}\nТовар: ${title}\nСсылка: ${item}\nСумма: ${amount} ${currency}\n\nПримите или отклоните приглашение.`,Markup.inlineKeyboard([[Markup.button.callback('✅ Принять',`deal_accept:${token}`),Markup.button.callback('❌ Отклонить',`deal_reject:${token}`)]] )).catch(e=>console.error('invite:',e.message));
   else return s.status(202).json({id:ins.lastInsertRowid,code:c,invite_url:link,notice:'Пользователь ещё не запускал бота. Отправьте ему ссылку вручную.'});
  }
  s.status(201).json({id:ins.lastInsertRowid,code:c,invite_url:link});
@@ -70,6 +70,23 @@ app.post('/api/deals/join',auth,(q,s)=>{
  db.prepare(`UPDATE deals SET counterparty_id=?,buyer_id=?,seller_id=?,status='Ожидает оплаты',updated_at=datetime('now') WHERE id=?`).run(q.user.id,buyer,seller,d.id);
  notify(d.creator_id===q.user.id?d.counterparty_telegram:db.prepare('SELECT telegram_id FROM users WHERE id=?').get(d.creator_id)?.telegram_id,`Участник подключился к сделке ${d.code}`);
  s.json({ok:true});
+});
+app.post('/api/deals/:id/pay',auth,(q,s)=>{
+ const d=db.prepare('SELECT * FROM deals WHERE id=?').get(Number(q.params.id));
+ if(!d||d.buyer_id!==q.user.id)return s.status(403).json({error:'Оплатить может только покупатель этой сделки'});
+ if(!d.counterparty_id||d.status!=='Ожидает оплаты')return s.status(409).json({error:'Сделка ещё не готова к оплате'});
+ const balance=db.prepare('SELECT amount FROM balances WHERE user_id=? AND currency=?').get(q.user.id,d.currency);
+ if(!balance||balance.amount<d.amount)return s.status(409).json({error:'Недостаточно средств на внутреннем балансе'});
+ try{db.transaction(()=>{
+  const debit=db.prepare('UPDATE balances SET amount=amount-? WHERE user_id=? AND currency=? AND amount>=?').run(d.amount,q.user.id,d.currency,d.amount);
+  if(!debit.changes)throw Error('Недостаточно средств на внутреннем балансе');
+  db.prepare('INSERT INTO ledger(user_id,kind,currency,amount,status,note) VALUES(?,?,?,?,?,?)').run(q.user.id,'Оплата сделки',d.currency,-d.amount,'списано',d.code);
+  const changed=db.prepare("UPDATE deals SET status='Оплачено — передать менеджеру',updated_at=datetime('now') WHERE id=? AND status='Ожидает оплаты'").run(d.id);
+  if(!changed.changes)throw Error('Сделка уже обработана');
+ })()}catch(e){return s.status(409).json({error:e.message||'Не удалось провести оплату'})}
+ const seller=db.prepare('SELECT telegram_id FROM users WHERE id=?').get(d.seller_id);
+ notify(seller?.telegram_id,`Покупатель оплатил сделку ${d.code}. Передайте товар согласно инструкции и добавьте фото подтверждения в Mini App.`);
+ s.json({ok:true,status:'Оплачено — передать менеджеру',manager_url:'https://t.me/playerok012'});
 });
 app.post('/api/deals/:id/proof',auth,(q,s)=>{
  const d=db.prepare('SELECT * FROM deals WHERE id=?').get(Number(q.params.id));
@@ -147,6 +164,28 @@ app.post('/api/admin/deals/:id/status',auth,admin,(q,s)=>{
 let bot=null;
 if(BOT_TOKEN){
  bot=new Telegraf(BOT_TOKEN);
+ bot.action(/^deal_accept:([a-f0-9]+)$/i,async ctx=>{
+  const token=ctx.match[1],d=db.prepare('SELECT * FROM deals WHERE invite_token=?').get(token);
+  if(!d||d.status!=='Приглашение отправлено')return ctx.answerCbQuery('Приглашение уже недействительно',{show_alert:true});
+  const target=String(ctx.from.id),username=String(ctx.from.username||'');
+  if(d.counterparty_telegram!==target&&d.counterparty_telegram.toLowerCase()!==username.toLowerCase())return ctx.answerCbQuery('Это приглашение адресовано другому пользователю',{show_alert:true});
+  const u=ensureUser(ctx.from);if(d.creator_id===u.id)return ctx.answerCbQuery('Нельзя принять собственное приглашение',{show_alert:true});
+  const role=d.role_creator==='buyer'?'seller':'buyer',buyer=role==='buyer'?u.id:d.creator_id,seller=role==='seller'?u.id:d.creator_id;
+  const changed=db.prepare("UPDATE deals SET counterparty_id=?,buyer_id=?,seller_id=?,status='Ожидает оплаты',updated_at=datetime('now') WHERE id=? AND status='Приглашение отправлено' AND (counterparty_id IS NULL OR counterparty_id=?)").run(u.id,buyer,seller,d.id,u.id);
+  if(!changed.changes)return ctx.answerCbQuery('Не удалось подключиться: сделка уже занята',{show_alert:true});
+  await ctx.answerCbQuery('Вы подключились к сделке');await ctx.editMessageReplyMarkup({inline_keyboard:[]}).catch(()=>{});
+  await ctx.reply('✅ Вы приняли приглашение. Откройте сделку в Playerok Garant.',Markup.inlineKeyboard([[Markup.button.webApp('Открыть сделку',APP_URL+'/?deal='+d.id)]]));
+  const creator=db.prepare('SELECT telegram_id FROM users WHERE id=?').get(d.creator_id);notify(creator?.telegram_id,`✅ Участник принял приглашение по сделке ${d.code}. Статус: ожидает оплаты.`);
+ });
+ bot.action(/^deal_reject:([a-f0-9]+)$/i,async ctx=>{
+  const token=ctx.match[1],d=db.prepare('SELECT * FROM deals WHERE invite_token=?').get(token);
+  if(!d||d.status!=='Приглашение отправлено')return ctx.answerCbQuery('Приглашение уже недействительно',{show_alert:true});
+  const target=String(ctx.from.id),username=String(ctx.from.username||'');
+  if(d.counterparty_telegram!==target&&d.counterparty_telegram.toLowerCase()!==username.toLowerCase())return ctx.answerCbQuery('Это приглашение адресовано другому пользователю',{show_alert:true});
+  db.prepare("UPDATE deals SET status='Приглашение отклонено',updated_at=datetime('now') WHERE id=? AND status='Приглашение отправлено'").run(d.id);
+  await ctx.answerCbQuery('Приглашение отклонено');await ctx.editMessageReplyMarkup({inline_keyboard:[]}).catch(()=>{});
+  const creator=db.prepare('SELECT telegram_id FROM users WHERE id=?').get(d.creator_id);notify(creator?.telegram_id,`❌ Пользователь отклонил приглашение по сделке ${d.code}.`);
+ });
  bot.start(async ctx=>{
   if(!APP_URL||!/^https:\/\//.test(APP_URL))return ctx.reply('Сервис Mini App ещё не настроен. Администратор должен указать APP_URL в Render → Environment.');
   return ctx.reply('Добро пожаловать в Playerok Garant! Создавайте сделки и следите за их статусом.',Markup.inlineKeyboard([[Markup.button.webApp('Открыть Playerok Garant',APP_URL)]]));
