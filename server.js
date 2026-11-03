@@ -1,184 +1,159 @@
 require('dotenv').config();
-const crypto = require('crypto');
-const path = require('path');
-const express = require('express');
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
-const { Telegraf, Markup } = require('telegraf');
-const { db, ensureUser, currencies } = require('./database');
-
-const app = express();
-const PORT = Number(process.env.PORT || 3000);
-const BOT_TOKEN = process.env.BOT_TOKEN || '';
-const APP_URL = (process.env.APP_URL || '').replace(/\/$/, '');
-const ADMIN_IDS = new Set((process.env.ADMIN_IDS || '').split(',').map(x => x.trim()).filter(Boolean));
-const DEV_AUTH_BYPASS = process.env.DEV_AUTH_BYPASS === 'true' && process.env.NODE_ENV !== 'production';
-const statuses = ['Ожидает подтверждения','Ожидает оплаты','Оплата подтверждена администратором','Товар передан','Покупатель подтвердил получение','Сделка завершена','Открыт спор','Сделка заморожена','Сделка отменена'];
-
+const crypto=require('crypto'),path=require('path'),fs=require('fs');
+const express=require('express'),helmet=require('helmet'),rateLimit=require('express-rate-limit');
+const {Telegraf,Markup}=require('telegraf');
+const {db,ensureUser,currencies}=require('./database');
+const app=express(),PORT=Number(process.env.PORT||3000);
+const BOT_TOKEN=process.env.BOT_TOKEN||'',APP_URL=(process.env.APP_URL||'').replace(/\/$/,'');
+const ROOT_ADMINS=new Set((process.env.ADMIN_IDS||'').split(',').map(x=>x.trim()).filter(Boolean));
+const uploads=path.join(__dirname,'uploads');fs.mkdirSync(uploads,{recursive:true});
 app.disable('x-powered-by');
-app.use(helmet({ contentSecurityPolicy: { directives: {
-  defaultSrc: ["'self'"], scriptSrc: ["'self'", 'https://telegram.org'], styleSrc: ["'self'", "'unsafe-inline'"],
-  imgSrc: ["'self'", 'data:', 'https:'], connectSrc: ["'self'"], frameAncestors: ['https://web.telegram.org', 'https://*.telegram.org']
-}}, crossOriginEmbedderPolicy: false }));
-app.use(express.json({ limit: '32kb' }));
-app.use('/api', rateLimit({ windowMs: 60_000, limit: 100, standardHeaders: 'draft-7', legacyHeaders: false }));
-app.use(express.static(path.join(__dirname, 'public')));
-
-function verifyInitData(initData) {
-  if (DEV_AUTH_BYPASS) return { id: 999999999, first_name: 'Dev', username: 'developer' };
-  if (!BOT_TOKEN || !initData || typeof initData !== 'string' || initData.length > 8192) throw new Error('Не удалось проверить Telegram-сессию');
-  const params = new URLSearchParams(initData);
-  const hash = params.get('hash');
-  const authDate = Number(params.get('auth_date'));
-  if (!hash || !Number.isFinite(authDate) || Math.abs(Date.now()/1000 - authDate) > 86400) throw new Error('Сессия Telegram устарела');
-  params.delete('hash');
-  const dataCheckString = [...params.entries()].sort(([a],[b]) => a.localeCompare(b)).map(([k,v]) => `${k}=${v}`).join('\n');
-  const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
-  const calculated = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
-  const a = Buffer.from(calculated, 'hex'); const b = Buffer.from(hash, 'hex');
-  if (a.length !== b.length || !crypto.timingSafeEqual(a,b)) throw new Error('Недействительная подпись Telegram');
-  const userRaw = params.get('user');
-  if (!userRaw) throw new Error('В Telegram не найден пользователь');
-  const user = JSON.parse(userRaw);
-  if (!user.id) throw new Error('Некорректный Telegram ID');
-  return user;
+app.use(helmet({contentSecurityPolicy:{directives:{defaultSrc:["'self'"],scriptSrc:["'self'",'https://telegram.org'],styleSrc:["'self'","'unsafe-inline'"],imgSrc:["'self'","data:",'https:'],connectSrc:["'self'"],frameAncestors:['https://web.telegram.org','https://*.telegram.org']}},crossOriginEmbedderPolicy:false}));
+app.use(express.json({limit:'3mb'}));app.use('/uploads',express.static(uploads));
+app.use('/api',rateLimit({windowMs:60000,limit:100,standardHeaders:'draft-7',legacyHeaders:false}));
+app.use(express.static(path.join(__dirname,'public')));
+function verify(initData){
+ if(process.env.DEV_AUTH_BYPASS==='true'&&process.env.NODE_ENV!=='production')return{id:999999999,first_name:'Тест',username:'test_user'};
+ if(!BOT_TOKEN||!initData)throw Error('Откройте Mini App через Telegram-бота');
+ const p=new URLSearchParams(initData),hash=p.get('hash'),date=Number(p.get('auth_date'));
+ if(!hash||!date||Math.abs(Date.now()/1000-date)>86400)throw Error('Сессия Telegram устарела');
+ p.delete('hash');const check=[...p.entries()].sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>`${k}=${v}`).join('\n');
+ const secret=crypto.createHmac('sha256','WebAppData').update(BOT_TOKEN).digest();
+ const calc=crypto.createHmac('sha256',secret).update(check).digest('hex');
+ const a=Buffer.from(calc,'hex'),b=Buffer.from(hash,'hex');
+ if(a.length!==b.length||!crypto.timingSafeEqual(a,b))throw Error('Недействительная подпись Telegram');
+ const user=JSON.parse(p.get('user')||'{}');if(!user.id)throw Error('Пользователь Telegram не найден');return user;
 }
-function auth(req,res,next) {
-  try {
-    const raw = req.headers.authorization || '';
-    const initData = raw.startsWith('tma ') ? raw.slice(4) : '';
-    const tg = verifyInitData(initData);
-    req.tg = tg;
-    req.user = ensureUser(tg);
-    req.isAdmin = ADMIN_IDS.has(String(tg.id));
-    next();
-  } catch (e) { res.status(401).json({ error: e.message || 'Требуется авторизация через Telegram' }); }
-}
-function admin(req,res,next) { if (!req.isAdmin) return res.status(403).json({error:'Доступ запрещён'}); next(); }
-function cleanText(v,max=500) { return String(v ?? '').trim().slice(0,max); }
-function makeCode() { return 'PG-' + crypto.randomBytes(4).toString('hex').toUpperCase(); }
-function audit(adminId, action, type, id, details={}) {
-  db.prepare('INSERT INTO admin_audit(admin_telegram_id,action,target_type,target_id,details) VALUES(?,?,?,?,?)')
-    .run(String(adminId), action, type, String(id), JSON.stringify(details));
-}
-function userPublic(u) { return { telegram_id:u.telegram_id, username:u.username, first_name:u.first_name, photo_url:u.photo_url }; }
-function dealForUser(deal, uid) {
-  return { ...deal, role: deal.buyer_id === uid ? 'Покупатель' : deal.seller_id === uid ? 'Продавец' : (deal.creator_id === uid ? 'Создатель' : 'Участник') };
-}
-
-app.get('/api/me', auth, (req,res) => {
-  const balances = db.prepare('SELECT currency,amount FROM balances WHERE user_id=?').all(req.user.id);
-  const operations = db.prepare('SELECT id,kind,currency,amount,status,note,created_at FROM ledger WHERE user_id=? ORDER BY id DESC LIMIT 20').all(req.user.id);
-  res.json({ user:userPublic(req.user), balances, operations, isAdmin:req.isAdmin });
+function auth(req,res,next){try{const h=req.headers.authorization||'';req.tg=verify(h.startsWith('tma ')?h.slice(4):'');req.user=ensureUser(req.tg);req.isAdmin=ROOT_ADMINS.has(String(req.tg.id))||!!db.prepare('SELECT 1 FROM admins WHERE telegram_id=?').get(String(req.tg.id));next()}catch(e){res.status(401).json({error:e.message})}}
+function admin(req,res,next){if(!req.isAdmin)return res.status(403).json({error:'Нет прав администратора'});next()}
+const clean=(v,n=500)=>String(v??'').trim().slice(0,n);
+const code=()=>`PG-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+function notify(id,text,extra){if(!bot||!id)return;bot.telegram.sendMessage(id,text,extra).catch(e=>console.error('notify:',e.message))}
+function publicUser(u){return{telegram_id:u.telegram_id,username:u.username,first_name:u.first_name,photo_url:u.photo_url}}
+app.get('/health',(q,s)=>s.json({service:'Playerok Garant',status:'running'}));
+app.get('/api/me',auth,(q,s)=>{
+ const balances=db.prepare('SELECT currency,amount FROM balances WHERE user_id=?').all(q.user.id);
+ const operations=db.prepare('SELECT * FROM ledger WHERE user_id=? ORDER BY id DESC LIMIT 25').all(q.user.id);
+ const stats=db.prepare(`SELECT COUNT(*) count,AVG(r.rating) rating FROM deals d LEFT JOIN reviews r ON r.target_id=? WHERE d.status='Сделка завершена' AND (d.buyer_id=? OR d.seller_id=?)`).get(q.user.id,q.user.id,q.user.id);
+ const reviews=db.prepare(`SELECT r.*,u.username,u.first_name FROM reviews r JOIN users u ON u.id=r.author_id WHERE r.target_id=? ORDER BY r.id DESC LIMIT 20`).all(q.user.id);
+ s.json({user:publicUser(q.user),balances,operations,isAdmin:q.isAdmin,stats,reviews});
 });
-app.get('/api/deals', auth, (req,res) => {
-  const rows = db.prepare(`SELECT * FROM deals WHERE creator_id=? OR counterparty_id=? ORDER BY id DESC`).all(req.user.id,req.user.id);
-  res.json(rows.map(d=>dealForUser(d,req.user.id)));
+app.get('/api/deals',auth,(q,s)=>{
+ const rows=db.prepare('SELECT * FROM deals WHERE creator_id=? OR counterparty_id=? ORDER BY id DESC').all(q.user.id,q.user.id);
+ s.json(rows.map(d=>({...d,role:d.buyer_id===q.user.id?'Покупатель':d.seller_id===q.user.id?'Продавец':d.role_creator==='buyer'?'Покупатель':'Продавец',isBuyer:d.buyer_id===q.user.id})));
 });
-app.post('/api/deals', auth, (req,res) => {
-  const title=cleanText(req.body.title,100), description=cleanText(req.body.description,1000), amount=Number(req.body.amount), currency=String(req.body.currency||'');
-  const target=cleanText(req.body.counterparty,100).replace(/^@/,'');
-  if(title.length<3 || !Number.isFinite(amount) || amount<=0 || amount>1e12 || !currencies.includes(currency)) return res.status(400).json({error:'Проверьте название, сумму и валюту'});
-  if(!target) return res.status(400).json({error:'Укажите Telegram ID или username второго участника'});
-  const code=makeCode(), token=crypto.randomBytes(18).toString('hex');
-  const telegramTarget=target;
-  const matched=byId ? db.prepare('SELECT id FROM users WHERE telegram_id=?').get(target) : db.prepare('SELECT id FROM users WHERE lower(username)=lower(?)').get(target);
-  const info=db.prepare(`INSERT INTO deals(code,creator_id,counterparty_telegram,counterparty_id,title,description,amount,currency,status,invite_token)
-    VALUES(?,?,?,?,?,?,?,?,?,?)`).run(code,req.user.id,telegramTarget,matched?.id||null,title,description,amount,currency,'Ожидает подтверждения',token);
-  res.status(201).json({id:info.lastInsertRowid,code,invite_token:token,invite_url:APP_URL?`${APP_URL}/?join=${token}`:`/?join=${token}`});
+app.post('/api/deals',auth,(q,s)=>{
+ const role=q.body.role, title=clean(q.body.title,100), item=clean(q.body.item_url,500), target=clean(q.body.counterparty,100).replace(/^@/,'');
+ const amount=Number(q.body.amount),currency=String(q.body.currency||'RUB'),description=clean(q.body.description,1000),mode=q.body.invite_mode==='auto'?'auto':'manual';
+ if(!['buyer','seller'].includes(role)||title.length<2||!/^https:\/\/\S+$/i.test(item)||!target||!Number.isFinite(amount)||amount<=0||!currencies.includes(currency))return s.status(400).json({error:'Проверьте роль, название, HTTPS-ссылку, username, сумму и валюту'});
+ const byId=/^\d+$/.test(target),found=byId?db.prepare('SELECT * FROM users WHERE telegram_id=?').get(target):db.prepare('SELECT * FROM users WHERE lower(username)=lower(?)').get(target);
+ if(found&&found.id===q.user.id)return s.status(400).json({error:'Нельзя пригласить самого себя'});
+ const token=crypto.randomBytes(20).toString('hex'),c=code();
+ const ins=db.prepare(`INSERT INTO deals(code,creator_id,counterparty_telegram,counterparty_id,role_creator,title,item_url,description,amount,currency,invite_token,invite_mode,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+ .run(c,q.user.id,target,found?.id||null,role,title,item,description,amount,currency,token,mode,mode==='auto'?'Приглашение отправлено':'Ожидает приглашения');
+ const link=`${APP_URL}/?join=${token}`;
+ if(mode==='auto'){
+  const dest=found?.telegram_id||(/^\d+$/.test(target)?target:null);
+  if(dest)notify(dest,`🤝 Вас приглашают в сделку Playerok Garant\nОт: @${q.tg.username||q.tg.id}\nТовар: ${title}\nСсылка: ${item}\nСумма: ${amount} ${currency}\n\nНажмите, чтобы открыть приглашение: ${link}`);
+  else return s.status(202).json({id:ins.lastInsertRowid,code:c,invite_url:link,notice:'Пользователь ещё не запускал бота. Отправьте ему ссылку вручную.'});
+ }
+ s.status(201).json({id:ins.lastInsertRowid,code:c,invite_url:link});
 });
-app.post('/api/deals/join', auth, (req,res) => {
-  const token=cleanText(req.body.token,100), role=req.body.role;
-  if(!['buyer','seller'].includes(role)) return res.status(400).json({error:'Выберите роль покупателя или продавца'});
-  const d=db.prepare('SELECT * FROM deals WHERE invite_token=?').get(token);
-  if(!d) return res.status(404).json({error:'Приглашение не найдено'});
-  if(d.creator_id===req.user.id) return res.status(400).json({error:'Создатель сделки не может присоединиться сам к себе'});
-  if(d.counterparty_telegram && d.counterparty_telegram!==String(req.tg.id) && d.counterparty_telegram!==req.tg.username) return res.status(403).json({error:'Приглашение предназначено другому участнику'});
-  if(d.counterparty_id && d.counterparty_id!==req.user.id) return res.status(409).json({error:'В сделке уже есть второй участник'});
-  const creatorRole = role==='buyer'?'seller':'buyer';
-  const buyer=role==='buyer'?req.user.id:d.creator_id, seller=role==='seller'?req.user.id:d.creator_id;
-  db.prepare(`UPDATE deals SET counterparty_id=?,buyer_id=?,seller_id=?,status='Ожидает оплаты',updated_at=datetime('now') WHERE id=?`)
-    .run(req.user.id,buyer,seller,d.id);
-  res.json({ok:true,deal:db.prepare('SELECT * FROM deals WHERE id=?').get(d.id)});
+app.post('/api/deals/join',auth,(q,s)=>{
+ const token=clean(q.body.token,100),role=q.body.role,d=db.prepare('SELECT * FROM deals WHERE invite_token=?').get(token);
+ if(!d)return s.status(404).json({error:'Приглашение не найдено'});
+ if(d.creator_id===q.user.id)return s.status(400).json({error:'Вы создатель сделки'});
+ if(d.counterparty_telegram&&d.counterparty_telegram!==String(q.tg.id)&&d.counterparty_telegram.toLowerCase()!==String(q.tg.username||'').toLowerCase())return s.status(403).json({error:'Приглашение адресовано другому пользователю'});
+ if(d.counterparty_id&&d.counterparty_id!==q.user.id)return s.status(409).json({error:'Второй участник уже подключился'});
+ if(!['buyer','seller'].includes(role)||role===d.role_creator)return s.status(400).json({error:'Выберите противоположную роль создателя сделки'});
+ const buyer=role==='buyer'?q.user.id:d.creator_id,seller=role==='seller'?q.user.id:d.creator_id;
+ db.prepare(`UPDATE deals SET counterparty_id=?,buyer_id=?,seller_id=?,status='Ожидает оплаты',updated_at=datetime('now') WHERE id=?`).run(q.user.id,buyer,seller,d.id);
+ notify(d.creator_id===q.user.id?d.counterparty_telegram:db.prepare('SELECT telegram_id FROM users WHERE id=?').get(d.creator_id)?.telegram_id,`Участник подключился к сделке ${d.code}`);
+ s.json({ok:true});
 });
-app.post('/api/deals/:id/received', auth, (req,res) => {
-  const d=db.prepare('SELECT * FROM deals WHERE id=?').get(Number(req.params.id));
-  if(!d || (d.creator_id!==req.user.id && d.counterparty_id!==req.user.id)) return res.status(404).json({error:'Сделка не найдена'});
-  if(d.buyer_id!==req.user.id) return res.status(403).json({error:'Подтвердить получение может только покупатель'});
-  if(d.status!=='Товар передан' && d.status!=='Оплата подтверждена администратором') return res.status(409).json({error:'Сейчас нельзя подтвердить получение'});
-  db.prepare(`UPDATE deals SET status='Покупатель подтвердил получение',updated_at=datetime('now') WHERE id=?`).run(d.id);
-  res.json({ok:true});
+app.post('/api/deals/:id/proof',auth,(q,s)=>{
+ const d=db.prepare('SELECT * FROM deals WHERE id=?').get(Number(q.params.id));
+ if(!d||![d.creator_id,d.counterparty_id].includes(q.user.id))return s.status(404).json({error:'Сделка не найдена'});
+ const data=String(q.body.image||'');if(!/^data:image\/(png|jpeg|webp);base64,/.test(data)||data.length>2_500_000)return s.status(400).json({error:'Загрузите изображение до 1.8 МБ'});
+ const m=data.match(/^data:image\/(png|jpeg|webp);base64,(.+)$/),ext=m[1]==='jpeg'?'jpg':m[1],name=`proof-${d.id}-${Date.now()}.${ext}`;
+ fs.writeFileSync(path.join(uploads,name),Buffer.from(m[2],'base64'));
+ db.prepare("UPDATE deals SET proof_url=?,status='Передача подтверждена продавцом',updated_at=datetime('now') WHERE id=?").run(`/uploads/${name}`,d.id);
+ const buyer=db.prepare('SELECT telegram_id FROM users WHERE id=?').get(d.buyer_id);notify(buyer?.telegram_id,`Продавец добавил подтверждение передачи по сделке ${d.code}. Проверьте его в Mini App.`);
+ s.json({ok:true,proof_url:`/uploads/${name}`});
 });
-app.post('/api/deals/:id/dispute', auth, (req,res) => {
-  const d=db.prepare('SELECT * FROM deals WHERE id=?').get(Number(req.params.id));
-  if(!d || (d.creator_id!==req.user.id && d.counterparty_id!==req.user.id)) return res.status(404).json({error:'Сделка не найдена'});
-  if(['Сделка завершена','Сделка отменена'].includes(d.status)) return res.status(409).json({error:'По завершённой или отменённой сделке спор не открывается'});
-  const reason=cleanText(req.body.reason,1000); if(reason.length<5) return res.status(400).json({error:'Опишите причину спора'});
-  const tx=db.transaction(()=>{db.prepare('INSERT INTO disputes(deal_id,opened_by,reason) VALUES(?,?,?)').run(d.id,req.user.id,reason);db.prepare(`UPDATE deals SET status='Открыт спор',updated_at=datetime('now') WHERE id=?`).run(d.id);}); tx();
-  res.json({ok:true});
+app.post('/api/deals/:id/received',auth,(q,s)=>{
+ const d=db.prepare('SELECT * FROM deals WHERE id=?').get(Number(q.params.id));
+ if(!d||d.buyer_id!==q.user.id)return s.status(403).json({error:'Подтвердить получение может только покупатель'});
+ if(!d.proof_url)return s.status(409).json({error:'Сначала продавец должен приложить подтверждение передачи'});
+ db.prepare("UPDATE deals SET status='Покупатель подтвердил получение — проверка админа',updated_at=datetime('now') WHERE id=?").run(d.id);
+ s.json({ok:true});
 });
-app.get('/api/admin/overview', auth, admin, (req,res) => {
-  const users=db.prepare('SELECT id,telegram_id,username,first_name,created_at FROM users ORDER BY id DESC LIMIT 500').all();
-  const deals=db.prepare(`SELECT d.*,u.telegram_id AS creator_telegram FROM deals d JOIN users u ON u.id=d.creator_id ORDER BY d.id DESC LIMIT 500`).all();
-  const ledger=db.prepare(`SELECT l.*,u.telegram_id,u.username FROM ledger l JOIN users u ON u.id=l.user_id ORDER BY l.id DESC LIMIT 500`).all();
-  const disputes=db.prepare(`SELECT s.*,d.code FROM disputes s JOIN deals d ON d.id=s.deal_id ORDER BY s.id DESC LIMIT 200`).all();
-  const auditRows=db.prepare('SELECT * FROM admin_audit ORDER BY id DESC LIMIT 200').all();
-  res.json({users,deals,ledger,disputes,audit:auditRows,statuses});
+app.post('/api/deals/:id/review',auth,(q,s)=>{
+ const d=db.prepare('SELECT * FROM deals WHERE id=?').get(Number(q.params.id));
+ if(!d||d.status!=='Сделка завершена'||![d.buyer_id,d.seller_id].includes(q.user.id))return s.status(409).json({error:'Отзыв доступен участникам завершённой сделки'});
+ const target=d.buyer_id===q.user.id?d.seller_id:d.buyer_id,rating=Number(q.body.rating),comment=clean(q.body.comment,500);
+ if(!Number.isInteger(rating)||rating<1||rating>5)return s.status(400).json({error:'Оценка от 1 до 5'});
+ try{db.prepare('INSERT INTO reviews(deal_id,author_id,target_id,rating,comment) VALUES(?,?,?,?,?)').run(d.id,q.user.id,target,rating,comment)}catch{return s.status(409).json({error:'Вы уже оставили отзыв по этой сделке'})}
+ s.json({ok:true});
 });
-app.post('/api/admin/deals/:id/status', auth, admin, (req,res) => {
-  const id=Number(req.params.id), status=cleanText(req.body.status,80), d=db.prepare('SELECT * FROM deals WHERE id=?').get(id);
-  if(!d) return res.status(404).json({error:'Сделка не найдена'});
-  if(!statuses.includes(status)) return res.status(400).json({error:'Недопустимый статус'});
-  if(status==='Оплата подтверждена администратором') return res.status(409).json({error:'Подтверждение оплаты отключено до подключения платёжного провайдера и проверки подписанного webhook. Ручной ввод ID транзакции не подтверждает платёж.'});
-  if(status==='Товар передан' && d.status!=='Оплата подтверждена администратором') return res.status(409).json({error:'Нельзя отметить передачу товара до подтверждённой оплаты.'});
-  if(status==='Сделка завершена' && d.status!=='Покупатель подтвердил получение') return res.status(409).json({error:'Сделка завершается только после подтверждения получения покупателем.'});
-  if(status==='Ожидает оплаты' && !d.counterparty_id) return res.status(409).json({error:'Сначала должен присоединиться второй участник.'});
-  db.prepare('UPDATE deals SET status=?,updated_at=datetime(\'now\') WHERE id=?').run(status,id);
-  audit(req.tg.id,'Изменён статус сделки','deal',id,{from:d.status,to:status});
-  res.json({ok:true});
+app.post('/api/daily',auth,(q,s)=>{
+ const day=new Date().toISOString().slice(0,10),amount=23.1;
+ try{db.transaction(()=>{db.prepare('INSERT INTO daily_claims(user_id,claim_date,amount) VALUES(?,?,?)').run(q.user.id,day,amount);db.prepare("UPDATE balances SET amount=amount+? WHERE user_id=? AND currency='RUB'").run(amount,q.user.id);db.prepare("INSERT INTO ledger(user_id,kind,currency,amount,status,note) VALUES(?,?,?,?,?,?)").run(q.user.id,'Ежедневная награда','RUB',amount,'начислено','Ежедневный бонус');})();s.json({ok:true,amount})}
+ catch{s.status(409).json({error:'Сегодняшняя награда уже получена'})}
 });
-app.post('/api/admin/disputes/:id/resolve', auth, admin, (req,res) => {
-  const id=Number(req.params.id), resolution=cleanText(req.body.resolution,1000);
-  const dispute=db.prepare('SELECT * FROM disputes WHERE id=?').get(id); if(!dispute) return res.status(404).json({error:'Спор не найден'});
-  if(resolution.length<5) return res.status(400).json({error:'Укажите решение'});
-  db.transaction(()=>{
-    db.prepare(`UPDATE disputes SET status='Решён',resolution=?,updated_at=datetime('now') WHERE id=?`).run(resolution,id);
-    db.prepare(`UPDATE deals SET status='Сделка заморожена',updated_at=datetime('now') WHERE id=?`).run(dispute.deal_id);
-    audit(req.tg.id,'Разрешён спор','dispute',id,{resolution});
-  })(); res.json({ok:true});
+app.get('/api/giveaways',auth,(q,s)=>s.json(db.prepare("SELECT g.*, (SELECT COUNT(*) FROM giveaway_entries e WHERE e.giveaway_id=g.id) participants,(SELECT COUNT(*) FROM giveaway_entries e WHERE e.giveaway_id=g.id AND e.user_id=?) joined FROM giveaways g WHERE status='active' ORDER BY id DESC").all(q.user.id)));
+app.post('/api/giveaways/:id/join',auth,(q,s)=>{try{db.prepare('INSERT INTO giveaway_entries(giveaway_id,user_id) VALUES(?,?)').run(Number(q.params.id),q.user.id);s.json({ok:true})}catch{s.status(409).json({error:'Вы уже участвуете или розыгрыш завершён'})}});
+app.get('/api/admin/overview',auth,admin,(q,s)=>{
+ const users=db.prepare('SELECT * FROM users ORDER BY id DESC LIMIT 500').all();
+ const deals=db.prepare('SELECT d.*,u.telegram_id creator_telegram FROM deals d JOIN users u ON u.id=d.creator_id ORDER BY d.id DESC LIMIT 500').all();
+ const ledger=db.prepare('SELECT l.*,u.telegram_id,u.username FROM ledger l JOIN users u ON u.id=l.user_id ORDER BY l.id DESC LIMIT 500').all();
+ const admins=db.prepare('SELECT * FROM admins ORDER BY created_at DESC').all();
+ const giveaways=db.prepare('SELECT * FROM giveaways ORDER BY id DESC').all();
+ s.json({users,deals,ledger,admins,giveaways});
 });
-app.post('/api/admin/ledger/credit', auth, admin, (req,res) => {
-  // This is an explicitly internal, non-cash accounting adjustment; never use it to claim a real deposit.
-  const telegramId=cleanText(req.body.telegram_id,30), currency=String(req.body.currency||''), amount=Number(req.body.amount), note=cleanText(req.body.note,300);
-  if(!currencies.includes(currency)||!Number.isFinite(amount)||amount<=0||amount>1e9||note.length<5) return res.status(400).json({error:'Некорректные параметры учётной корректировки'});
-  const user=db.prepare('SELECT * FROM users WHERE telegram_id=?').get(telegramId); if(!user) return res.status(404).json({error:'Пользователь не найден'});
-  const key='admin-credit:'+crypto.randomUUID();
-  db.transaction(()=>{
-    db.prepare('UPDATE balances SET amount=amount+? WHERE user_id=? AND currency=?').run(amount,user.id,currency);
-    db.prepare(`INSERT INTO ledger(user_id,kind,currency,amount,status,idempotency_key,note) VALUES(?,?,?,?,?,?,?)`).run(user.id,'Корректировка учёта',currency,amount,'внутренняя запись',key,note);
-    audit(req.tg.id,'Внутренняя корректировка учёта','user',telegramId,{currency,amount,note});
-  })(); res.json({ok:true,warning:'Это внутренняя учётная запись, не подтверждение реального платежа.'});
+app.post('/api/admin/credit',auth,admin,(q,s)=>{
+ const tid=clean(q.body.telegram_id,30),currency=String(q.body.currency||'RUB'),amount=Number(q.body.amount),note=clean(q.body.note,250);
+ const u=db.prepare('SELECT * FROM users WHERE telegram_id=?').get(tid);
+ if(!u||!currencies.includes(currency)||!Number.isFinite(amount)||amount<=0||amount>1e9||note.length<3)return s.status(400).json({error:'Проверьте ID, валюту, сумму и комментарий'});
+ db.transaction(()=>{db.prepare('UPDATE balances SET amount=amount+? WHERE user_id=? AND currency=?').run(amount,u.id,currency);db.prepare('INSERT INTO ledger(user_id,kind,currency,amount,status,note) VALUES(?,?,?,?,?,?)').run(u.id,'Внутренняя корректировка',''+currency,amount,'учётная запись',note);db.prepare('INSERT INTO audit(admin_id,action,target,details) VALUES(?,?,?,?)').run(q.tg.id,'Выдан внутренний баланс',tid,JSON.stringify({currency,amount,note}))})();
+ s.json({ok:true,warning:'Это внутренняя запись, не подтверждение платежа.'});
 });
-app.get('/health', (req,res)=>res.json({service:'Playerok Garant',status:'running'}));
-app.get('*', (req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
-
-let bot;
-if (BOT_TOKEN) {
-  bot = new Telegraf(BOT_TOKEN);
-  const miniAppButton = Markup.button.webApp('Открыть Playerok Garant', APP_URL || 'https://example.com');
-  bot.start(async (ctx) => {
-    const text='Добро пожаловать в Playerok Garant!\n\nСоздавайте сделки, приглашайте вторую сторону и отслеживайте этапы сделки в Mini App. Внутренний баланс является учётным и сам по себе не означает получение денежных средств.';
-    const keyboard=Markup.inlineKeyboard([[miniAppButton],[Markup.button.callback('Мои сделки','my_deals'),Markup.button.callback('Мой баланс','my_balance')],[Markup.button.url('Поддержка','https://t.me/telegram')]]);
-    const photo=process.env.WELCOME_PHOTO_URL;
-    if(photo && /^https:\/\//.test(photo)) await ctx.replyWithPhoto(photo,{caption:text,reply_markup:keyboard.reply_markup});
-    else await ctx.reply(text,keyboard);
-  });
-  bot.action('my_deals',ctx=>ctx.answerCbQuery('Откройте Mini App → Мои сделки'));
-  bot.action('my_balance',ctx=>ctx.answerCbQuery('Откройте Mini App → Профиль'));
-  bot.catch(err=>console.error('Telegram bot error:',err));
-  bot.launch().then(()=>console.log('Telegram bot started')).catch(err=>console.error('Bot launch failed:',err));
-} else console.warn('BOT_TOKEN is empty: HTTP server will run, Telegram bot is disabled.');
-
-const server=app.listen(PORT,()=>console.log(`Playerok Garant listening on ${PORT}`));
-async function shutdown(){server.close();if(bot) await bot.stop('SIGTERM');db.close();process.exit(0);}
-process.once('SIGINT',shutdown); process.once('SIGTERM',shutdown);
+app.post('/api/admin/admins',auth,admin,(q,s)=>{
+ const tid=clean(q.body.telegram_id,30);if(!/^\d+$/.test(tid))return s.status(400).json({error:'Нужен числовой Telegram ID'});
+ if(ROOT_ADMINS.has(tid))return s.status(400).json({error:'Главного администратора нельзя менять здесь'});
+ db.prepare('INSERT OR IGNORE INTO admins(telegram_id,granted_by) VALUES(?,?)').run(tid,String(q.tg.id));
+ db.prepare('INSERT INTO audit(admin_id,action,target) VALUES(?,?,?)').run(q.tg.id,'Выданы права администратора',tid);s.json({ok:true});
+});
+app.delete('/api/admin/admins/:id',auth,admin,(q,s)=>{
+ const tid=clean(q.params.id,30);if(ROOT_ADMINS.has(tid))return s.status(400).json({error:'Главного администратора нельзя удалить'});
+ db.prepare('DELETE FROM admins WHERE telegram_id=?').run(tid);db.prepare('INSERT INTO audit(admin_id,action,target) VALUES(?,?,?)').run(q.tg.id,'Отозваны права администратора',tid);s.json({ok:true});
+});
+app.post('/api/admin/deals/:id/finish',auth,admin,(q,s)=>{
+ const d=db.prepare('SELECT * FROM deals WHERE id=?').get(Number(q.params.id));
+ if(!d||!['Покупатель подтвердил получение — проверка админа','Передача подтверждена продавцом'].includes(d.status))return s.status(409).json({error:'Сделка ещё не готова к проверке'});
+ db.prepare("UPDATE deals SET status='Сделка завершена',updated_at=datetime('now') WHERE id=?").run(d.id);s.json({ok:true});
+});
+app.post('/api/admin/giveaways',auth,admin,(q,s)=>{
+ const title=clean(q.body.title,100),prize=clean(q.body.prize,150),ends=clean(q.body.ends_at,40);
+ if(!title||!prize)return s.status(400).json({error:'Заполните название и приз'});
+ const r=db.prepare('INSERT INTO giveaways(title,prize,ends_at) VALUES(?,?,?)').run(title,prize,ends||null);s.json({ok:true,id:r.lastInsertRowid});
+});
+app.post('/api/admin/deals/:id/status',auth,admin,(q,s)=>{
+ const d=db.prepare('SELECT * FROM deals WHERE id=?').get(Number(q.params.id)),status=clean(q.body.status,100);
+ if(!d)return s.status(404).json({error:'Сделка не найдена'});
+ if(status==='Сделка завершена'&&d.status!=='Покупатель подтвердил получение — проверка админа')return s.status(409).json({error:'Сначала покупатель должен подтвердить получение'});
+ db.prepare("UPDATE deals SET status=?,updated_at=datetime('now') WHERE id=?").run(status,d.id);s.json({ok:true});
+});
+let bot=null;
+if(BOT_TOKEN){
+ bot=new Telegraf(BOT_TOKEN);
+ bot.start(async ctx=>{
+  if(!APP_URL||!/^https:\/\//.test(APP_URL))return ctx.reply('Сервис Mini App ещё не настроен. Администратор должен указать APP_URL в Render → Environment.');
+  return ctx.reply('Добро пожаловать в Playerok Garant! Создавайте сделки и следите за их статусом.',Markup.inlineKeyboard([[Markup.button.webApp('Открыть Playerok Garant',APP_URL)]]));
+ });
+ bot.catch(e=>console.error('Bot error',e));
+ bot.launch().then(()=>console.log('Telegram bot started')).catch(e=>console.error('Bot launch failed',e.message));
+}else console.warn('BOT_TOKEN пуст: бот отключён');
+const server=app.listen(PORT,()=>console.log(`Playerok Garant listening on ${PORT}; APP_URL=${APP_URL||'(not set)'}`));
+async function stop(){server.close();if(bot)await bot.stop('SIGTERM');db.close();process.exit(0)}
+process.once('SIGINT',stop);process.once('SIGTERM',stop);
