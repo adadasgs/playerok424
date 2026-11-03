@@ -1,1 +1,30 @@
-
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b0d12"><title>Playerok Garant</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar"><div class="brand-mark">PG</div><div class="brand-copy"><b>PLAYEROK <span>GARANT</span></b><small>Безопасные сделки</small></div><button id="profileShortcut" class="avatar" aria-label="Профиль">PG</button></header>
+    <main>
+      <section id="homeView" class="view active">
+        <div class="hero"><div class="eyebrow"><i></i> СДЕЛКИ ПОД КОНТРОЛЕМ</div><h1>Покупайте и продавайте<br><span>спокойно.</span></h1><p>Создайте сделку, пригласите вторую сторону и следите за каждым этапом.</p><div class="hero-actions"><button class="btn primary" data-action="create">＋ Создать сделку</button><button class="btn secondary" data-view="deals">Мои сделки <span>→</span></button></div><div class="hero-orbit"><div class="shield">✓</div><div class="orbit-line"></div></div></div>
+        <div class="section-head"><div><span class="eyebrow muted">ВАШ АККАУНТ</span><h2>Обзор</h2></div><button class="text-btn" data-view="profile">Подробнее →</button></div>
+        <div class="balance-card"><div><span class="muted">Внутренний учётный баланс</span><h2 id="homeBalance">0.00 <small>RUB</small></h2></div><div class="balance-icon">₽</div><div class="balance-foot">Не является подтверждением реальных денежных средств</div></div>
+        <div class="quick-grid"><button class="quick-card" data-view="deals"><span class="quick-icon">⇄</span><b>Мои сделки</b><small>Статусы и детали</small></button><button class="quick-card" data-view="profile"><span class="quick-icon">◉</span><b>Мой профиль</b><small>Баланс и операции</small></button></div>
+        <div class="section-head"><div><span class="eyebrow muted">ПОСЛЕДНИЕ ДЕЙСТВИЯ</span><h2>История</h2></div></div><div id="homeOperations" class="empty compact">Операций пока нет</div>
+      </section>
+      <section id="dealsView" class="view"><div class="page-title"><span class="eyebrow muted">УПРАВЛЕНИЕ</span><h1>Мои сделки</h1><p>Все ваши активные и завершённые сделки в одном месте.</p></div><button class="btn primary full" data-action="create">＋ Создать сделку</button><div id="dealsList" class="stack empty">Пока нет сделок</div></section>
+      <section id="createView" class="view"><div class="page-title"><button class="back" data-view="home">← Назад</button><span class="eyebrow muted">НОВАЯ СДЕЛКА</span><h1>Создать сделку</h1><p>Заполните условия и отправьте приглашение второй стороне.</p></div><form id="createForm" class="panel form-panel"><label>Название товара или услуги<input name="title" required minlength="3" maxlength="100" placeholder="Например, аккаунт PUBG"></label><label>Описание<textarea name="description" maxlength="1000" rows="3" placeholder="Опишите товар, сроки и условия"></textarea></label><div class="two-col"><label>Сумма<input name="amount" type="number" min="0.01" step="0.01" required placeholder="0.00"></label><label>Валюта<select name="currency"><option>RUB</option><option>UAH</option><option>BYN</option><option>TON</option><option>XTR</option></select></label></div><label>Telegram ID или username второго участника<input name="counterparty" required maxlength="100" placeholder="@username или 123456789"></label><div class="notice">После создания появится персональная ссылка-приглашение. Сделка не означает, что оплата уже произведена.</div><button class="btn primary full" type="submit">Создать и получить ссылку</button></form></section>
+      <section id="profileView" class="view"><div class="page-title"><span class="eyebrow muted">ЛИЧНЫЙ КАБИНЕТ</span><h1>Мой профиль</h1></div><div class="profile-card"><div id="profileAvatar" class="profile-avatar">PG</div><div><h2 id="profileName">Пользователь</h2><span id="profileUsername" class="muted">Telegram</span><small id="telegramId" class="muted"></small></div></div><div class="section-head"><h2>Баланс по валютам</h2></div><div id="balances" class="currency-grid"></div><div class="notice">Баланс — внутренний учёт сервиса. Пополнение и выплаты станут доступны после подключения и проверки законного платёжного провайдера.</div><div class="section-head"><h2>История операций</h2></div><div id="operations" class="stack empty">Операций пока нет</div></section>
+      <section id="adminView" class="view"><div class="page-title"><span class="eyebrow muted">УПРАВЛЕНИЕ СЕРВИСОМ</span><h1>Админ-панель</h1><p>Доступ подтверждён сервером по Telegram ID.</p></div><div id="adminContent" class="stack">Загрузка…</div></section>
+    </main>
+    <nav class="bottom-nav"><button class="nav-item selected" data-view="home"><span>⌂</span>Главная</button><button class="nav-item" data-view="deals"><span>⇄</span>Сделки</button><button class="nav-item" data-view="profile"><span>◉</span>Профиль</button><button id="adminNav" class="nav-item hidden" data-view="admin"><span>▦</span>Админ</button></nav>
+  </div>
+  <div id="toast" class="toast" role="status"></div>
+  <div id="modal" class="modal hidden"><div class="modal-card"><button class="modal-close" id="modalClose">×</button><div id="modalContent"></div></div></div>
+  <script src="/app.js"></script>
+</body></html>
