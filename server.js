@@ -191,7 +191,10 @@ if(BOT_TOKEN){
  });
  bot.start(async ctx=>{
   if(!APP_URL||!/^https:\/\//.test(APP_URL))return ctx.reply('Сервис Mini App ещё не настроен. Администратор должен указать APP_URL в Render → Environment.');
-  return ctx.reply('Добро пожаловать в Playerok Garant! Создавайте сделки и следите за их статусом.',Markup.inlineKeyboard([[Markup.button.webApp('Открыть Playerok Garant',APP_URL)]]));
+  const caption='🔵 <b>PLAYEROK GARANT</b>\\n\\nПокупай и продавай игровые товары с сопровождением сделки.\\n\\n💸 <b>Комиссия — 0,3%</b>\\n🛡️ <b>Гарант-сопровождение</b>\\n🕒 <b>Поддержка 24/7</b>\\n⚡ <b>Создание сделки за пару минут</b>\\n\\nНажми кнопку ниже, чтобы начать.';
+  const keyboard=Markup.inlineKeyboard([[Markup.button.webApp('🚀 Открыть Playerok Garant',APP_URL)]]);
+  try{return await ctx.replyWithPhoto('https://placehold.co/1200x630/071a3d/ffffff.png?text=PLAYEROK+GARANT',{caption,parse_mode:'HTML',...keyboard});}
+  catch(e){console.error('Welcome photo failed:',e.message);return ctx.reply(caption,{parse_mode:'HTML',...keyboard});}
  });
  bot.catch(e=>console.error('Bot error',e));
  bot.launch().then(()=>console.log('Telegram bot started')).catch(e=>console.error('Bot launch failed',e.message));
