@@ -220,15 +220,23 @@ if(BOT_TOKEN){
   const creator=db.prepare('SELECT telegram_id FROM users WHERE id=?').get(d.creator_id);notify(creator?.telegram_id,`❌ Пользователь отклонил приглашение по сделке ${d.code}.`);
  });
  bot.start(async ctx=>{
-  try{
-   ensureUser(ctx.from);
-   if(!APP_URL||!/^https:\/\//.test(APP_URL)){
-    return await ctx.reply('Сервис Mini App ещё не настроен. Администратор должен указать APP_URL в Render → Environment.');
-   }
-   const caption='🔵 <b>PLAYEROK GARANT</b>\n\nПокупай и продавай игровые товары с сопровождением сделки.\n\n🛡️ Безопасное сопровождение сделки\n⚡ Создание сделки за пару минут\n\nНажми кнопку ниже, чтобы начать.';
-   const keyboard=Markup.inlineKeyboard([[Markup.button.webApp('🚀 Открыть Playerok Garant',APP_URL)]]);
-   // Отправляем текст без внешней картинки: /start не зависит от загрузки изображения со стороннего сервера.
-   await ctx.reply(caption,{parse_mode:'HTML',...keyboard});
+    try{
+      ensureUser(ctx.from);
+      if(!APP_URL||!/^https:\/\//.test(APP_URL)){
+        return await ctx.reply('Сервис Mini App ещё не настроен. Администратор должен указать APP_URL в Render → Environment.');
+      }
+      const caption='🔵 <b>PLAYEROK GARANT</b>\n\nПокупай и продавай игровые товары с сопровождением сделки.\n\n🛡️ Безопасное сопровождение сделки\n⚡ Создание сделки за пару минут\n\nНажми кнопку ниже, чтобы начать.';
+      const keyboard=Markup.inlineKeyboard([[Markup.button.webApp('🚀 Открыть Playerok Garant',APP_URL)]]);
+      await ctx.replyWithPhoto('https://yt3.googleusercontent.com/x0VDNCjEUECho-G4LGHWpGgrntCLi2dc8eE_1BUAhxy7POCwGL8rKTbEqfLaeWmlsFD1Wjbl39o=s900-c-k-c0x00ffffff-no-rj',{caption,parse_mode:'HTML',...keyboard});
+    }catch(e){
+      console.error('START_HANDLER_FAILED:',e.stack||e.message);
+      try{
+        const caption='🔵 <b>PLAYEROK GARANT</b>\n\nПокупай и продавай игровые товары с сопровождением сделки.\n\nНажми кнопку ниже, чтобы начать.';
+        const keyboard=Markup.inlineKeyboard([[Markup.button.webApp('🚀 Открыть Playerok Garant',APP_URL)]]);
+        await ctx.reply(caption,{parse_mode:'HTML',...keyboard});
+      }catch(replyError){console.error('START_REPLY_FAILED:',replyError.message)}
+    }
+  });
   }catch(e){
    console.error('START_HANDLER_FAILED:',e.stack||e.message);
    try{await ctx.reply('Не удалось открыть меню. Попробуйте ещё раз через минуту.');}catch(replyError){console.error('START_REPLY_FAILED:',replyError.message)}
