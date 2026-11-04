@@ -26,6 +26,7 @@ function verify(initData){
 }
 function auth(req,res,next){try{const h=req.headers.authorization||'';req.tg=verify(h.startsWith('tma ')?h.slice(4):'');req.user=ensureUser(req.tg);req.isAdmin=ROOT_ADMINS.has(String(req.tg.id))||!!db.prepare('SELECT 1 FROM admins WHERE telegram_id=?').get(String(req.tg.id));next()}catch(e){res.status(401).json({error:e.message})}}
 function admin(req,res,next){if(!req.isAdmin)return res.status(403).json({error:'Нет прав администратора'});next()}
+function rootAdmin(req,res,next){if(!ROOT_ADMINS.has(String(req.tg.id)))return res.status(403).json({error:'Только главный администратор может управлять правами администраторов'});next()}
 const clean=(v,n=500)=>String(v??'').trim().slice(0,n);
 const code=()=>`PG-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
 function notify(id,text,extra){if(!bot||!id)return;bot.telegram.sendMessage(id,text,extra).catch(e=>console.error('notify:',e.message))}
@@ -36,26 +37,26 @@ app.get('/api/me',auth,(q,s)=>{
  const operations=db.prepare('SELECT * FROM ledger WHERE user_id=? ORDER BY id DESC LIMIT 25').all(q.user.id);
  const stats=db.prepare(`SELECT COUNT(*) count,AVG(r.rating) rating FROM deals d LEFT JOIN reviews r ON r.target_id=? WHERE d.status='Сделка завершена' AND (d.buyer_id=? OR d.seller_id=?)`).get(q.user.id,q.user.id,q.user.id);
  const reviews=db.prepare(`SELECT r.*,u.username,u.first_name FROM reviews r JOIN users u ON u.id=r.author_id WHERE r.target_id=? ORDER BY r.id DESC LIMIT 20`).all(q.user.id);
- s.json({user:publicUser(q.user),balances,operations,isAdmin:q.isAdmin,stats,reviews});
+ s.json({user:publicUser(q.user),balances,operations,isAdmin:q.isAdmin,isRootAdmin:ROOT_ADMINS.has(String(q.tg.id)),stats,reviews});
 });
 app.get('/api/deals',auth,(q,s)=>{
  const rows=db.prepare('SELECT * FROM deals WHERE creator_id=? OR counterparty_id=? ORDER BY id DESC').all(q.user.id,q.user.id);
  s.json(rows.map(d=>({...d,role:d.buyer_id===q.user.id?'Покупатель':d.seller_id===q.user.id?'Продавец':d.role_creator==='buyer'?'Покупатель':'Продавец',isBuyer:d.buyer_id===q.user.id})));
 });
-app.post('/api/deals',auth,(q,s)=>{
- const role=q.body.role, title=clean(q.body.title,100), item=clean(q.body.item_url,500), target=clean(q.body.counterparty,100).replace(/^@/,'');
- const amount=Number(q.body.amount),currency=String(q.body.currency||'RUB'),description=clean(q.body.description,1000),mode=q.body.invite_mode==='auto'?'auto':'manual';
+app.post('/api/deals',auth,async(q,s)=>{
+ const role=q.body.role,title=clean(q.body.title,100),item=clean(q.body.item_url,500),target=clean(q.body.counterparty,100).replace(/^@/,''),
+ amount=Number(q.body.amount),currency=String(q.body.currency||'RUB'),description=clean(q.body.description,1000),mode=q.body.invite_mode==='auto'?'auto':'manual';
  if(!['buyer','seller'].includes(role)||title.length<2||!/^https:\/\/\S+$/i.test(item)||!target||!Number.isFinite(amount)||amount<=0||!currencies.includes(currency))return s.status(400).json({error:'Проверьте роль, название, HTTPS-ссылку, username, сумму и валюту'});
  const byId=/^\d+$/.test(target),found=byId?db.prepare('SELECT * FROM users WHERE telegram_id=?').get(target):db.prepare('SELECT * FROM users WHERE lower(username)=lower(?)').get(target);
  if(found&&found.id===q.user.id)return s.status(400).json({error:'Нельзя пригласить самого себя'});
  const token=crypto.randomBytes(20).toString('hex'),c=code();
- const ins=db.prepare(`INSERT INTO deals(code,creator_id,counterparty_telegram,counterparty_id,role_creator,title,item_url,description,amount,currency,invite_token,invite_mode,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
- .run(c,q.user.id,target,found?.id||null,role,title,item,description,amount,currency,token,mode,mode==='auto'?'Приглашение отправлено':'Ожидает приглашения');
- const link=`${APP_URL}/?join=${token}`;
+ const ins=db.prepare('INSERT INTO deals(code,creator_id,counterparty_telegram,counterparty_id,role_creator,title,item_url,description,amount,currency,invite_token,invite_mode,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(c,q.user.id,target,found?.id||null,role,title,item,description,amount,currency,token,mode,mode==='auto'?'Приглашение отправляется':'Ожидает приглашения');
+ const link=APP_URL+'/?join='+token;
  if(mode==='auto'){
   const dest=found?.telegram_id||(/^\d+$/.test(target)?target:null);
-  if(dest&&bot)bot.telegram.sendMessage(dest,`🤝 Вас приглашают в сделку Playerok Garant\nОт: @${q.tg.username||q.tg.id}\nТовар: ${title}\nСсылка: ${item}\nСумма: ${amount} ${currency}\n\nПримите или отклоните приглашение.`,Markup.inlineKeyboard([[Markup.button.callback('✅ Принять',`deal_accept:${token}`),Markup.button.callback('❌ Отклонить',`deal_reject:${token}`)]] )).catch(e=>console.error('invite:',e.message));
-  else return s.status(202).json({id:ins.lastInsertRowid,code:c,invite_url:link,notice:'Пользователь ещё не запускал бота. Отправьте ему ссылку вручную.'});
+  if(!bot||!dest){db.prepare("UPDATE deals SET status='Ожидает ручного приглашения',updated_at=datetime('now') WHERE id=?").run(ins.lastInsertRowid);return s.status(202).json({id:ins.lastInsertRowid,code:c,invite_url:link,notice:!bot?'Бот не подключён. Сделка сохранена — отправьте ссылку вручную.':'Бот не может первым написать по личному @username. Пусть участник откроет бота и нажмёт /start, либо отправьте ссылку вручную.'});}
+  try{await bot.telegram.sendMessage(dest,'🤝 Вас приглашают в сделку Playerok Garant\nОт: @'+(q.tg.username||q.tg.id)+'\nТовар: '+title+'\nСсылка: '+item+'\nСумма: '+amount+' '+currency+'\n\nПримите или отклоните приглашение.',Markup.inlineKeyboard([[Markup.button.callback('✅ Принять','deal_accept:'+token),Markup.button.callback('❌ Отклонить','deal_reject:'+token)]]));db.prepare("UPDATE deals SET status='Приглашение отправлено',updated_at=datetime('now') WHERE id=?").run(ins.lastInsertRowid);return s.status(201).json({id:ins.lastInsertRowid,code:c,invite_url:link,notice:'Приглашение отправлено в Telegram.'});}
+  catch(e){const desc=String(e.description||e.message||'').toLowerCase();const reason=desc.includes('blocked')||desc.includes('chat not found')||desc.includes('user is deactivated')?'Пользователь должен открыть бота Playerok Garant и нажать /start. После этого отправьте приглашение повторно или вручную перешлите ссылку.':'Telegram не принял сообщение. Сделка сохранена, отправьте ссылку участнику вручную.';console.error('invite send failed:',e.message);db.prepare("UPDATE deals SET status='Ожидает ручного приглашения',updated_at=datetime('now') WHERE id=?").run(ins.lastInsertRowid);return s.status(202).json({id:ins.lastInsertRowid,code:c,invite_url:link,notice:reason});}
  }
  s.status(201).json({id:ins.lastInsertRowid,code:c,invite_url:link});
 });
@@ -126,7 +127,7 @@ app.get('/api/admin/overview',auth,admin,(q,s)=>{
  const ledger=db.prepare('SELECT l.*,u.telegram_id,u.username FROM ledger l JOIN users u ON u.id=l.user_id ORDER BY l.id DESC LIMIT 500').all();
  const admins=db.prepare('SELECT * FROM admins ORDER BY created_at DESC').all();
  const giveaways=db.prepare('SELECT * FROM giveaways ORDER BY id DESC').all();
- s.json({users,deals,ledger,admins,giveaways});
+ s.json({users,deals,ledger,admins,giveaways,rootAdmins:[...ROOT_ADMINS]});
 });
 app.post('/api/admin/credit',auth,admin,(q,s)=>{
  const tid=clean(q.body.telegram_id,30),currency=String(q.body.currency||'RUB'),amount=Number(q.body.amount),note=clean(q.body.note,250);
@@ -135,13 +136,13 @@ app.post('/api/admin/credit',auth,admin,(q,s)=>{
  db.transaction(()=>{db.prepare('UPDATE balances SET amount=amount+? WHERE user_id=? AND currency=?').run(amount,u.id,currency);db.prepare('INSERT INTO ledger(user_id,kind,currency,amount,status,note) VALUES(?,?,?,?,?,?)').run(u.id,'Внутренняя корректировка',''+currency,amount,'учётная запись',note);db.prepare('INSERT INTO audit(admin_id,action,target,details) VALUES(?,?,?,?)').run(q.tg.id,'Выдан внутренний баланс',tid,JSON.stringify({currency,amount,note}))})();
  s.json({ok:true,warning:'Это внутренняя запись, не подтверждение платежа.'});
 });
-app.post('/api/admin/admins',auth,admin,(q,s)=>{
+app.post('/api/admin/admins',auth,admin,rootAdmin,(q,s)=>{
  const tid=clean(q.body.telegram_id,30);if(!/^\d+$/.test(tid))return s.status(400).json({error:'Нужен числовой Telegram ID'});
  if(ROOT_ADMINS.has(tid))return s.status(400).json({error:'Главного администратора нельзя менять здесь'});
  db.prepare('INSERT OR IGNORE INTO admins(telegram_id,granted_by) VALUES(?,?)').run(tid,String(q.tg.id));
  db.prepare('INSERT INTO audit(admin_id,action,target) VALUES(?,?,?)').run(q.tg.id,'Выданы права администратора',tid);s.json({ok:true});
 });
-app.delete('/api/admin/admins/:id',auth,admin,(q,s)=>{
+app.delete('/api/admin/admins/:id',auth,admin,rootAdmin,(q,s)=>{
  const tid=clean(q.params.id,30);if(ROOT_ADMINS.has(tid))return s.status(400).json({error:'Главного администратора нельзя удалить'});
  db.prepare('DELETE FROM admins WHERE telegram_id=?').run(tid);db.prepare('INSERT INTO audit(admin_id,action,target) VALUES(?,?,?)').run(q.tg.id,'Отозваны права администратора',tid);s.json({ok:true});
 });
