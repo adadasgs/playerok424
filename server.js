@@ -66,7 +66,7 @@ app.post('/api/deals',auth,(q,s)=>{
   return;
  }
  bot.telegram.sendMessage(dest,'🤝 Вас приглашают в сделку Playerok Garant\nОт: @'+(q.tg.username||q.tg.id)+'\nТовар: '+title+'\nСсылка: '+item+'\nСумма: '+amount+' '+currency+'\n\nПримите или отклоните приглашение.',Markup.inlineKeyboard([[Markup.button.callback('✅ Принять','deal_accept:'+token),Markup.button.callback('❌ Отклонить','deal_reject:'+token)]]))
-  .then(()=>db.prepare("UPDATE deals SET status='Приглашение отправлено',updated_at=datetime('now') WHERE id=?").run(id))
+  .then(()=>db.prepare("UPDATE deals SET status='Приглашение отправлено',updated_at=datetime('now') WHERE id=? AND status='Приглашение отправляется'").run(id))
   .catch(e=>{
    const desc=String(e.description||e.message||'').toLowerCase();
    const reason='Ожидает ручного приглашения';
@@ -191,7 +191,7 @@ if(BOT_TOKEN){
   if(d.counterparty_telegram!==target&&d.counterparty_telegram.toLowerCase()!==username.toLowerCase())return ctx.answerCbQuery('Это приглашение адресовано другому пользователю',{show_alert:true});
   const u=ensureUser(ctx.from);if(d.creator_id===u.id)return ctx.answerCbQuery('Нельзя принять собственное приглашение',{show_alert:true});
   const role=d.role_creator==='buyer'?'seller':'buyer',buyer=role==='buyer'?u.id:d.creator_id,seller=role==='seller'?u.id:d.creator_id;
-  const changed=db.prepare("UPDATE deals SET counterparty_id=?,buyer_id=?,seller_id=?,status='Ожидает оплаты',updated_at=datetime('now') WHERE id=? AND status='Приглашение отправлено' AND (counterparty_id IS NULL OR counterparty_id=?)").run(u.id,buyer,seller,d.id,u.id);
+  const changed=db.prepare("UPDATE deals SET counterparty_id=?,buyer_id=?,seller_id=?,status='Ожидает оплаты',updated_at=datetime('now') WHERE id=? AND status IN ('Приглашение отправляется','Приглашение отправлено') AND (counterparty_id IS NULL OR counterparty_id=?)").run(u.id,buyer,seller,d.id,u.id);
   if(!changed.changes)return ctx.answerCbQuery('Не удалось подключиться: сделка уже занята',{show_alert:true});
   await ctx.answerCbQuery('Вы подключились к сделке');await ctx.editMessageReplyMarkup({inline_keyboard:[]}).catch(()=>{});
   await ctx.reply('✅ Вы приняли приглашение. Откройте сделку в Playerok Garant.',Markup.inlineKeyboard([[Markup.button.webApp('Открыть сделку',APP_URL+'/?deal='+d.id)]]));
@@ -202,7 +202,7 @@ if(BOT_TOKEN){
   if(!d||!['Приглашение отправляется','Приглашение отправлено'].includes(d.status))return ctx.answerCbQuery('Приглашение уже недействительно',{show_alert:true});
   const target=String(ctx.from.id),username=String(ctx.from.username||'');
   if(d.counterparty_telegram!==target&&d.counterparty_telegram.toLowerCase()!==username.toLowerCase())return ctx.answerCbQuery('Это приглашение адресовано другому пользователю',{show_alert:true});
-  db.prepare("UPDATE deals SET status='Приглашение отклонено',updated_at=datetime('now') WHERE id=? AND status='Приглашение отправлено'").run(d.id);
+  db.prepare("UPDATE deals SET status='Приглашение отклонено',updated_at=datetime('now') WHERE id=? AND status IN ('Приглашение отправляется','Приглашение отправлено')").run(d.id);
   await ctx.answerCbQuery('Приглашение отклонено');await ctx.editMessageReplyMarkup({inline_keyboard:[]}).catch(()=>{});
   const creator=db.prepare('SELECT telegram_id FROM users WHERE id=?').get(d.creator_id);notify(creator?.telegram_id,`❌ Пользователь отклонил приглашение по сделке ${d.code}.`);
  });
