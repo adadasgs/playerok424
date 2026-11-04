@@ -51,6 +51,8 @@ app.post('/api/deals',auth,(q,s)=>{
  // При самостоятельном приглашении получатель не обязателен: пользователь отправит ссылку сам.
  if(!['buyer','seller'].includes(role)||title.length<2||!/^https:\/\/\S+$/i.test(item)||(mode==='auto'&&!target)||!Number.isFinite(amount)||amount<=0||!currencies.includes(currency))return s.status(400).json({error:'Проверьте роль, название, HTTPS-ссылку, сумму и валюту. Для автоматического приглашения укажите username или Telegram ID.'});
  const byId=/^\d+$/.test(target),found=target?(byId?db.prepare('SELECT * FROM users WHERE telegram_id=?').get(target):db.prepare('SELECT * FROM users WHERE lower(username)=lower(?)').get(target)):null;
+ if(mode==='auto'&&!bot)return s.status(503).json({error:'Telegram-бот сейчас не запущен. Проверьте BOT_TOKEN в Render.'});
+ if(mode==='auto'&&!byId&&!found)return s.status(400).json({error:'Получатель ещё не зарегистрирован. Пусть он откроет вашего бота и нажмёт Start, затем повторите приглашение по @username.'});
  if(found&&found.id===q.user.id)return s.status(400).json({error:'Нельзя пригласить самого себя'});
  const token=crypto.randomBytes(20).toString('hex'),c=code();
  const ins=db.prepare('INSERT INTO deals(code,creator_id,counterparty_telegram,counterparty_id,role_creator,title,item_url,description,amount,currency,invite_token,invite_mode,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(c,q.user.id,target||null,found?.id||null,role,title,item,description,amount,currency,token,mode,mode==='auto'?'Приглашение отправляется':'Ожидает приглашения');
@@ -67,9 +69,11 @@ app.post('/api/deals',auth,(q,s)=>{
   .then(()=>db.prepare("UPDATE deals SET status='Приглашение отправлено',updated_at=datetime('now') WHERE id=?").run(id))
   .catch(e=>{
    const desc=String(e.description||e.message||'').toLowerCase();
-   const reason=desc.includes('blocked')||desc.includes('chat not found')||desc.includes('user is deactivated')?'Ожидает ручного приглашения':'Ожидает ручного приглашения';
+   const reason='Ожидает ручного приглашения';
    console.error('invite send failed:',e.message);
    db.prepare("UPDATE deals SET status=?,updated_at=datetime('now') WHERE id=?").run(reason,id);
+   const creator=db.prepare('SELECT telegram_id FROM users WHERE id=?').get(q.user.id);
+   notify(creator?.telegram_id,'⚠️ Не удалось отправить автоматическое приглашение. Получатель должен открыть бота и нажать Start. Отправьте ему ссылку на сделку вручную. Причина: '+(desc.includes('blocked')?'получатель заблокировал бота':desc.includes('chat not found')?'получатель ещё не запускал бота':'Telegram отклонил сообщение'));
   });
 });
 app.post('/api/deals/join',auth,(q,s)=>{
@@ -200,6 +204,7 @@ if(BOT_TOKEN){
   const creator=db.prepare('SELECT telegram_id FROM users WHERE id=?').get(d.creator_id);notify(creator?.telegram_id,`❌ Пользователь отклонил приглашение по сделке ${d.code}.`);
  });
  bot.start(async ctx=>{
+  try{ensureUser(ctx.from)}catch(e){console.error('Failed to register bot user:',e.message)}
   if(!APP_URL||!/^https:\/\//.test(APP_URL))return ctx.reply('Сервис Mini App ещё не настроен. Администратор должен указать APP_URL в Render → Environment.');
   const caption='🔵 <b>PLAYEROK GARANT</b>\n\nПокупай и продавай игровые товары с сопровождением сделки.\n\n💸 <b>Комиссия — 0,3%</b>\n🛡️ <b>Гарант-сопровождение</b>\n🕒 <b>Поддержка 24/7</b>\n⚡ <b>Создание сделки за пару минут</b>\n\nНажми кнопку ниже, чтобы начать.';
   const keyboard=Markup.inlineKeyboard([[Markup.button.webApp('🚀 Открыть Playerok Garant',APP_URL)]]);
