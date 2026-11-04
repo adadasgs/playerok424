@@ -2,7 +2,9 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 const legacyPath = path.join(__dirname,'data','playerok-garant.sqlite');
-const dbPath = process.env.DATABASE_PATH || legacyPath;
+// DATA_DIR and DATABASE_PATH can point to a Render Persistent Disk.
+const dataDir = process.env.DATA_DIR || path.join(__dirname,'data');
+const dbPath = process.env.DATABASE_PATH || path.join(dataDir,'playerok-garant.sqlite');
 fs.mkdirSync(path.dirname(dbPath),{recursive:true});
 // One-time copy from the old local data folder when a Render persistent disk is first attached.
 if(path.resolve(dbPath)!==path.resolve(legacyPath)&&!fs.existsSync(dbPath)&&fs.existsSync(legacyPath)){
