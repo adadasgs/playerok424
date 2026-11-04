@@ -4,7 +4,7 @@ const express=require('express'),helmet=require('helmet'),rateLimit=require('exp
 const {Telegraf,Markup}=require('telegraf');
 const {db,ensureUser,currencies}=require('./database');
 const app=express(),PORT=Number(process.env.PORT||3000);
-const BOT_TOKEN=process.env.BOT_TOKEN||'',APP_URL=(process.env.APP_URL||'').replace(/\/$/,'');
+const BOT_TOKEN=process.env.BOT_TOKEN||'',APP_URL=(process.env.APP_URL||'https://playerok424-zwwb.onrender.com').replace(/\/$/,'');
 const ROOT_ADMINS=new Set((process.env.ADMIN_IDS||'').split(',').map(x=>x.trim()).filter(Boolean));
 const dataDir=process.env.DATA_DIR||path.join(__dirname,'data');
 const uploads=path.join(dataDir,'uploads');fs.mkdirSync(uploads,{recursive:true});
@@ -45,7 +45,7 @@ app.get('/api/deals',auth,(q,s)=>{
  const rows=db.prepare('SELECT * FROM deals WHERE creator_id=? OR counterparty_id=? ORDER BY id DESC').all(q.user.id,q.user.id);
  s.json(rows.map(d=>({...d,role:d.buyer_id===q.user.id?'Покупатель':d.seller_id===q.user.id?'Продавец':d.role_creator==='buyer'?'Покупатель':'Продавец',isBuyer:d.buyer_id===q.user.id})));
 });
-app.post('/api/deals',auth,async(q,s)=>{
+app.post('/api/deals',auth,(q,s)=>{
  const role=q.body.role,title=clean(q.body.title,100),item=clean(q.body.item_url,500),target=clean(q.body.counterparty,100).replace(/^@/,''),
  amount=Number(q.body.amount),currency=String(q.body.currency||'RUB'),description=clean(q.body.description,1000),mode=q.body.invite_mode==='auto'?'auto':'manual';
  if(!['buyer','seller'].includes(role)||title.length<2||!/^https:\/\/\S+$/i.test(item)||!target||!Number.isFinite(amount)||amount<=0||!currencies.includes(currency))return s.status(400).json({error:'Проверьте роль, название, HTTPS-ссылку, username, сумму и валюту'});
@@ -53,14 +53,23 @@ app.post('/api/deals',auth,async(q,s)=>{
  if(found&&found.id===q.user.id)return s.status(400).json({error:'Нельзя пригласить самого себя'});
  const token=crypto.randomBytes(20).toString('hex'),c=code();
  const ins=db.prepare('INSERT INTO deals(code,creator_id,counterparty_telegram,counterparty_id,role_creator,title,item_url,description,amount,currency,invite_token,invite_mode,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(c,q.user.id,target,found?.id||null,role,title,item,description,amount,currency,token,mode,mode==='auto'?'Приглашение отправляется':'Ожидает приглашения');
- const link=APP_URL+'/?join='+token;
- if(mode==='auto'){
-  const dest=found?.telegram_id||(/^\d+$/.test(target)?target:null);
-  if(!bot||!dest){db.prepare("UPDATE deals SET status='Ожидает ручного приглашения',updated_at=datetime('now') WHERE id=?").run(ins.lastInsertRowid);return s.status(202).json({id:ins.lastInsertRowid,code:c,invite_url:link,notice:!bot?'Бот не подключён. Сделка сохранена — отправьте ссылку вручную.':'Бот не может первым написать по личному @username. Пусть участник откроет бота и нажмёт /start, либо отправьте ссылку вручную.'});}
-  try{await bot.telegram.sendMessage(dest,'🤝 Вас приглашают в сделку Playerok Garant\nОт: @'+(q.tg.username||q.tg.id)+'\nТовар: '+title+'\nСсылка: '+item+'\nСумма: '+amount+' '+currency+'\n\nПримите или отклоните приглашение.',Markup.inlineKeyboard([[Markup.button.callback('✅ Принять','deal_accept:'+token),Markup.button.callback('❌ Отклонить','deal_reject:'+token)]]));db.prepare("UPDATE deals SET status='Приглашение отправлено',updated_at=datetime('now') WHERE id=?").run(ins.lastInsertRowid);return s.status(201).json({id:ins.lastInsertRowid,code:c,invite_url:link,notice:'Приглашение отправлено в Telegram.'});}
-  catch(e){const desc=String(e.description||e.message||'').toLowerCase();const reason=desc.includes('blocked')||desc.includes('chat not found')||desc.includes('user is deactivated')?'Пользователь должен открыть бота Playerok Garant и нажать /start. После этого отправьте приглашение повторно или вручную перешлите ссылку.':'Telegram не принял сообщение. Сделка сохранена, отправьте ссылку участнику вручную.';console.error('invite send failed:',e.message);db.prepare("UPDATE deals SET status='Ожидает ручного приглашения',updated_at=datetime('now') WHERE id=?").run(ins.lastInsertRowid);return s.status(202).json({id:ins.lastInsertRowid,code:c,invite_url:link,notice:reason});}
+ const id=Number(ins.lastInsertRowid),link=APP_URL+'/?join='+token;
+ // Respond immediately: Telegram delivery is performed in the background.
+ s.status(201).json({id,code:c,invite_url:link,notice:mode==='auto'?'Сделка создана. Отправляем приглашение в Telegram.':'Сделка создана. Отправьте ссылку второму участнику.'});
+ if(mode!=='auto')return;
+ const dest=found?.telegram_id||(/^\d+$/.test(target)?target:null);
+ if(!bot||!dest){
+  db.prepare("UPDATE deals SET status='Ожидает ручного приглашения',updated_at=datetime('now') WHERE id=?").run(id);
+  return;
  }
- s.status(201).json({id:ins.lastInsertRowid,code:c,invite_url:link});
+ bot.telegram.sendMessage(dest,'🤝 Вас приглашают в сделку Playerok Garant\nОт: @'+(q.tg.username||q.tg.id)+'\nТовар: '+title+'\nСсылка: '+item+'\nСумма: '+amount+' '+currency+'\n\nПримите или отклоните приглашение.',Markup.inlineKeyboard([[Markup.button.callback('✅ Принять','deal_accept:'+token),Markup.button.callback('❌ Отклонить','deal_reject:'+token)]]))
+  .then(()=>db.prepare("UPDATE deals SET status='Приглашение отправлено',updated_at=datetime('now') WHERE id=?").run(id))
+  .catch(e=>{
+   const desc=String(e.description||e.message||'').toLowerCase();
+   const reason=desc.includes('blocked')||desc.includes('chat not found')||desc.includes('user is deactivated')?'Ожидает ручного приглашения':'Ожидает ручного приглашения';
+   console.error('invite send failed:',e.message);
+   db.prepare("UPDATE deals SET status=?,updated_at=datetime('now') WHERE id=?").run(reason,id);
+  });
 });
 app.post('/api/deals/join',auth,(q,s)=>{
  const token=clean(q.body.token,100),role=q.body.role,d=db.prepare('SELECT * FROM deals WHERE invite_token=?').get(token);
