@@ -50,9 +50,9 @@ app.post('/api/deals',auth,(q,s)=>{
  amount=Number(q.body.amount),currency=String(q.body.currency||'RUB'),description=clean(q.body.description,1000),mode=q.body.invite_mode==='auto'?'auto':'manual';
  // При самостоятельном приглашении получатель не обязателен: пользователь отправит ссылку сам.
  if(!['buyer','seller'].includes(role)||title.length<2||!/^https:\/\/\S+$/i.test(item)||(mode==='auto'&&!target)||!Number.isFinite(amount)||amount<=0||!currencies.includes(currency))return s.status(400).json({error:'Проверьте роль, название, HTTPS-ссылку, сумму и валюту. Для автоматического приглашения укажите username или Telegram ID.'});
- const byId=/^\d+$/.test(target),found=target?(byId?db.prepare('SELECT * FROM users WHERE telegram_id=?').get(target):db.prepare('SELECT * FROM users WHERE lower(username)=lower(?)').get(target)):null;
+ const byId=/^\d+$/.test(target),found=target?(byId?db.prepare('SELECT * FROM users WHERE telegram_id=?').get(target):db.prepare('SELECT * FROM users WHERE lower(trim(username))=lower(?)').get(target)):null;
  if(mode==='auto'&&!bot)return s.status(503).json({error:'Telegram-бот сейчас не запущен. Проверьте BOT_TOKEN в Render.'});
- if(mode==='auto'&&!byId&&!found)return s.status(400).json({error:'Получатель ещё не зарегистрирован. Пусть он откроет вашего бота и нажмёт Start, затем повторите приглашение по @username.'});
+ if(mode==='auto'&&!byId&&!found)return s.status(400).json({error:'Не нашёл этот username среди пользователей, которые запускали именно этого бота. Попросите получателя открыть @playerok012?start=register и нажать Start, затем укажите его числовой Telegram ID (команда /id в боте). По одному @username Telegram не разрешает боту начать личный чат.'});
  if(found&&found.id===q.user.id)return s.status(400).json({error:'Нельзя пригласить самого себя'});
  const token=crypto.randomBytes(20).toString('hex'),c=code();
  const ins=db.prepare('INSERT INTO deals(code,creator_id,counterparty_telegram,counterparty_id,role_creator,title,item_url,description,amount,currency,invite_token,invite_mode,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(c,q.user.id,target||null,found?.id||null,role,title,item,description,amount,currency,token,mode,mode==='auto'?'Приглашение отправляется':'Ожидает приглашения');
@@ -181,9 +181,12 @@ app.post('/api/admin/deals/:id/status',auth,admin,(q,s)=>{
 let bot=null;
 if(BOT_TOKEN){
  bot=new Telegraf(BOT_TOKEN);
+ // Сохраняем Telegram-пользователя при любом взаимодействии с ботом, не только при /start.
+ bot.use(async(ctx,next)=>{if(ctx.from){try{ensureUser(ctx.from)}catch(e){console.error('User sync failed:',e.message)}}return next()});
+ bot.command('id',ctx=>ctx.reply('Ваш Telegram ID: '+ctx.from.id+'\\nЕго можно указать в Mini App для автоматического приглашения.'));
  bot.action(/^deal_accept:([a-f0-9]+)$/i,async ctx=>{
   const token=ctx.match[1],d=db.prepare('SELECT * FROM deals WHERE invite_token=?').get(token);
-  if(!d||d.status!=='Приглашение отправлено')return ctx.answerCbQuery('Приглашение уже недействительно',{show_alert:true});
+  if(!d||!['Приглашение отправляется','Приглашение отправлено'].includes(d.status))return ctx.answerCbQuery('Приглашение уже недействительно',{show_alert:true});
   const target=String(ctx.from.id),username=String(ctx.from.username||'');
   if(d.counterparty_telegram!==target&&d.counterparty_telegram.toLowerCase()!==username.toLowerCase())return ctx.answerCbQuery('Это приглашение адресовано другому пользователю',{show_alert:true});
   const u=ensureUser(ctx.from);if(d.creator_id===u.id)return ctx.answerCbQuery('Нельзя принять собственное приглашение',{show_alert:true});
@@ -196,7 +199,7 @@ if(BOT_TOKEN){
  });
  bot.action(/^deal_reject:([a-f0-9]+)$/i,async ctx=>{
   const token=ctx.match[1],d=db.prepare('SELECT * FROM deals WHERE invite_token=?').get(token);
-  if(!d||d.status!=='Приглашение отправлено')return ctx.answerCbQuery('Приглашение уже недействительно',{show_alert:true});
+  if(!d||!['Приглашение отправляется','Приглашение отправлено'].includes(d.status))return ctx.answerCbQuery('Приглашение уже недействительно',{show_alert:true});
   const target=String(ctx.from.id),username=String(ctx.from.username||'');
   if(d.counterparty_telegram!==target&&d.counterparty_telegram.toLowerCase()!==username.toLowerCase())return ctx.answerCbQuery('Это приглашение адресовано другому пользователю',{show_alert:true});
   db.prepare("UPDATE deals SET status='Приглашение отклонено',updated_at=datetime('now') WHERE id=? AND status='Приглашение отправлено'").run(d.id);
