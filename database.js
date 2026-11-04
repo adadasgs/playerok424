@@ -1,8 +1,13 @@
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
-const dbPath = process.env.DATABASE_PATH || path.join(__dirname,'data','playerok-garant.sqlite');
+const legacyPath = path.join(__dirname,'data','playerok-garant.sqlite');
+const dbPath = process.env.DATABASE_PATH || legacyPath;
 fs.mkdirSync(path.dirname(dbPath),{recursive:true});
+// One-time copy from the old local data folder when a Render persistent disk is first attached.
+if(path.resolve(dbPath)!==path.resolve(legacyPath)&&!fs.existsSync(dbPath)&&fs.existsSync(legacyPath)){
+ try{fs.copyFileSync(legacyPath,dbPath);if(fs.existsSync(legacyPath+'-wal'))fs.copyFileSync(legacyPath+'-wal',dbPath+'-wal');if(fs.existsSync(legacyPath+'-shm'))fs.copyFileSync(legacyPath+'-shm',dbPath+'-shm');console.log('Migrated existing SQLite database to persistent storage');}catch(e){console.error('Database migration copy failed:',e.message)}
+}
 const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
