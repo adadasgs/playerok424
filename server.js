@@ -46,13 +46,14 @@ app.get('/api/deals',auth,(q,s)=>{
  s.json(rows.map(d=>({...d,role:d.buyer_id===q.user.id?'Покупатель':d.seller_id===q.user.id?'Продавец':d.role_creator==='buyer'?'Покупатель':'Продавец',isBuyer:d.buyer_id===q.user.id})));
 });
 app.post('/api/deals',auth,(q,s)=>{
- const role=q.body.role,title=clean(q.body.title,100),item=clean(q.body.item_url,500),target=clean(q.body.counterparty,100).replace(/^@/,''),
+ const role=q.body.role,title=clean(q.body.title,100),item=clean(q.body.item_url,500),target=clean(q.body.counterparty,100).replace(/^@/, ''),
  amount=Number(q.body.amount),currency=String(q.body.currency||'RUB'),description=clean(q.body.description,1000),mode=q.body.invite_mode==='auto'?'auto':'manual';
- if(!['buyer','seller'].includes(role)||title.length<2||!/^https:\/\/\S+$/i.test(item)||!target||!Number.isFinite(amount)||amount<=0||!currencies.includes(currency))return s.status(400).json({error:'Проверьте роль, название, HTTPS-ссылку, username, сумму и валюту'});
- const byId=/^\d+$/.test(target),found=byId?db.prepare('SELECT * FROM users WHERE telegram_id=?').get(target):db.prepare('SELECT * FROM users WHERE lower(username)=lower(?)').get(target);
+ // При самостоятельном приглашении получатель не обязателен: пользователь отправит ссылку сам.
+ if(!['buyer','seller'].includes(role)||title.length<2||!/^https:\/\/\\S+$/i.test(item)||(mode==='auto'&&!target)||!Number.isFinite(amount)||amount<=0||!currencies.includes(currency))return s.status(400).json({error:'Проверьте роль, название, HTTPS-ссылку, сумму и валюту. Для автоматического приглашения укажите username или Telegram ID.'});
+ const byId=/^\\d+$/.test(target),found=target?(byId?db.prepare('SELECT * FROM users WHERE telegram_id=?').get(target):db.prepare('SELECT * FROM users WHERE lower(username)=lower(?)').get(target)):null;
  if(found&&found.id===q.user.id)return s.status(400).json({error:'Нельзя пригласить самого себя'});
  const token=crypto.randomBytes(20).toString('hex'),c=code();
- const ins=db.prepare('INSERT INTO deals(code,creator_id,counterparty_telegram,counterparty_id,role_creator,title,item_url,description,amount,currency,invite_token,invite_mode,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(c,q.user.id,target,found?.id||null,role,title,item,description,amount,currency,token,mode,mode==='auto'?'Приглашение отправляется':'Ожидает приглашения');
+ const ins=db.prepare('INSERT INTO deals(code,creator_id,counterparty_telegram,counterparty_id,role_creator,title,item_url,description,amount,currency,invite_token,invite_mode,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(c,q.user.id,target||null,found?.id||null,role,title,item,description,amount,currency,token,mode,mode==='auto'?'Приглашение отправляется':'Ожидает приглашения');
  const id=Number(ins.lastInsertRowid),link=APP_URL+'/?join='+token;
  // Respond immediately: Telegram delivery is performed in the background.
  s.status(201).json({id,code:c,invite_url:link,notice:mode==='auto'?'Сделка создана. Отправляем приглашение в Telegram.':'Сделка создана. Отправьте ссылку второму участнику.'});
