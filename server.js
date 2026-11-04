@@ -6,7 +6,9 @@ const {db,ensureUser,currencies}=require('./database');
 const app=express(),PORT=Number(process.env.PORT||3000);
 const BOT_TOKEN=process.env.BOT_TOKEN||'',APP_URL=(process.env.APP_URL||'').replace(/\/$/,'');
 const ROOT_ADMINS=new Set((process.env.ADMIN_IDS||'').split(',').map(x=>x.trim()).filter(Boolean));
-const dataDir=process.env.DATA_DIR||path.join(__dirname,'data');\nconst uploads=path.join(dataDir,'uploads');fs.mkdirSync(uploads,{recursive:true});\nconst legacyUploads=path.join(__dirname,'uploads');if(path.resolve(legacyUploads)!==path.resolve(uploads)&&fs.existsSync(legacyUploads)){try{for(const name of fs.readdirSync(legacyUploads)){const from=path.join(legacyUploads,name),to=path.join(uploads,name);if(fs.statSync(from).isFile()&&!fs.existsSync(to))fs.copyFileSync(from,to)}}catch(e){console.error('Upload migration failed:',e.message)}}
+const dataDir=process.env.DATA_DIR||path.join(__dirname,'data');
+const uploads=path.join(dataDir,'uploads');fs.mkdirSync(uploads,{recursive:true});
+const legacyUploads=path.join(__dirname,'uploads');if(path.resolve(legacyUploads)!==path.resolve(uploads)&&fs.existsSync(legacyUploads)){try{for(const name of fs.readdirSync(legacyUploads)){const from=path.join(legacyUploads,name),to=path.join(uploads,name);if(fs.statSync(from).isFile()&&!fs.existsSync(to))fs.copyFileSync(from,to)}}catch(e){console.error('Upload migration failed:',e.message)}}
 app.disable('x-powered-by');
 app.use(helmet({contentSecurityPolicy:{directives:{defaultSrc:["'self'"],scriptSrc:["'self'",'https://telegram.org'],styleSrc:["'self'","'unsafe-inline'"],imgSrc:["'self'","data:",'https:'],connectSrc:["'self'"],frameAncestors:['https://web.telegram.org','https://*.telegram.org']}},crossOriginEmbedderPolicy:false}));
 app.use(express.json({limit:'3mb'}));app.use('/uploads',express.static(uploads));
