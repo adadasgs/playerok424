@@ -115,6 +115,19 @@ app.post('/api/deals/:id/proof',auth,(q,s)=>{
  const buyer=db.prepare('SELECT telegram_id FROM users WHERE id=?').get(d.buyer_id);notify(buyer?.telegram_id,`Продавец добавил подтверждение передачи по сделке ${d.code}. Проверьте его в Mini App.`);
  s.json({ok:true,proof_url:`/uploads/${name}`});
 });
+app.post('/api/deals/:id/cancel',auth,(q,s)=>{
+ const d=db.prepare('SELECT * FROM deals WHERE id=?').get(Number(q.params.id));
+ if(!d||![d.creator_id,d.counterparty_id].includes(q.user.id))return s.status(404).json({error:'Сделка не найдена'});
+ const locked=['Оплачено — передать менеджеру','Передача подтверждена продавцом','Покупатель подтвердил получение — проверка админа','Сделка завершена'];
+ if(locked.includes(d.status))return s.status(409).json({error:'После оплаты отмену может выполнить только администратор после проверки'});
+ if(['Сделка отменена','Приглашение отклонено'].includes(d.status))return s.status(409).json({error:'Сделка уже отменена'});
+ const changed=db.prepare("UPDATE deals SET status='Сделка отменена',updated_at=datetime('now') WHERE id=? AND status=?").run(d.id,d.status);
+ if(!changed.changes)return s.status(409).json({error:'Статус сделки уже изменился. Обновите страницу.'});
+ const otherId=q.user.id===d.creator_id?d.counterparty_id:d.creator_id;
+ const other=otherId?db.prepare('SELECT telegram_id FROM users WHERE id=?').get(otherId):null;
+ notify(other?.telegram_id,`Сделка ${d.code} отменена вторым участником.`);
+ s.json({ok:true,status:'Сделка отменена'});
+});
 app.post('/api/deals/:id/received',auth,(q,s)=>{
  const d=db.prepare('SELECT * FROM deals WHERE id=?').get(Number(q.params.id));
  if(!d||d.buyer_id!==q.user.id)return s.status(403).json({error:'Подтвердить получение может только покупатель'});
