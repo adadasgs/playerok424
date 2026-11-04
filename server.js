@@ -237,11 +237,6 @@ if(BOT_TOKEN){
       }catch(replyError){console.error('START_REPLY_FAILED:',replyError.message)}
     }
   });
-  }catch(e){
-   console.error('START_HANDLER_FAILED:',e.stack||e.message);
-   try{await ctx.reply('Не удалось открыть меню. Попробуйте ещё раз через минуту.');}catch(replyError){console.error('START_REPLY_FAILED:',replyError.message)}
-  }
- });
  bot.catch(e=>console.error('Bot error',e));
  bot.launch().then(()=>console.log('Telegram bot started')).catch(e=>console.error('Bot launch failed',e.message));
 }else console.warn('BOT_TOKEN пуст: бот отключён');
