@@ -5,7 +5,7 @@ const {Telegraf,Markup}=require('telegraf');
 const {db,ensureUser,currencies}=require('./database');
 const app=express(),PORT=Number(process.env.PORT||3000);
 app.set('trust proxy',1);
-const BOT_TOKEN=process.env.BOT_TOKEN||'',APP_URL=(process.env.APP_URL||'https://playerok424-zwwb.onrender.com').replace(/\/$/,'');
+const BOT_TOKEN=(process.env.BOT_TOKEN||'').trim(),APP_URL=(process.env.APP_URL||'https://playerok424-zwwb.onrender.com').replace(/\/$/,'');
 const ROOT_ADMINS=new Set((process.env.ADMIN_IDS||'').split(',').map(x=>x.trim()).filter(Boolean));
 const dataDir=process.env.DATA_DIR||path.join(__dirname,'data');
 const uploads=path.join(dataDir,'uploads');fs.mkdirSync(uploads,{recursive:true});
@@ -238,9 +238,20 @@ if(BOT_TOKEN){
       }catch(replyError){console.error('START_REPLY_FAILED:',replyError.message)}
     }
   });
- bot.catch(e=>console.error('Bot error',e));
- bot.launch().then(()=>console.log('Telegram bot started')).catch(e=>console.error('Bot launch failed',e.message));
-}else console.warn('BOT_TOKEN пуст: бот отключён');
+ bot.catch((e,ctx)=>console.error('BOT_UPDATE_FAILED:',e.stack||e.message,'update:',ctx?.updateType||'unknown'));
+ (async()=>{
+  try{
+   const me=await bot.telegram.getMe();
+   console.log('TELEGRAM_BOT_IDENTITY:', '@'+me.username, 'id='+me.id);
+   // Этот проект использует long polling, поэтому удаляем возможный старый webhook.
+   await bot.telegram.deleteWebhook({drop_pending_updates:false});
+   await bot.launch({dropPendingUpdates:false});
+   console.log('TELEGRAM_POLLING_STARTED: @'+me.username);
+  }catch(e){
+   console.error('TELEGRAM_BOT_START_FAILED:',e.stack||e.message);
+  }
+ })();
+}else console.error('BOT_TOKEN_MISSING: Telegram bot is disabled');
 const server=app.listen(PORT,()=>console.log(`Playerok Garant listening on ${PORT}; APP_URL=${APP_URL||'(not set)'}`));
 async function stop(){server.close();if(bot)await bot.stop('SIGTERM');db.close();process.exit(0)}
 process.once('SIGINT',stop);process.once('SIGTERM',stop);
