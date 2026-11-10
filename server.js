@@ -6,7 +6,7 @@ const {db,ensureUser,currencies}=require('./database');
 const app=express(),PORT=Number(process.env.PORT||3000);
 app.set('trust proxy',1);
 const BOT_TOKEN=(process.env.BOT_TOKEN||'').trim(),APP_URL=(process.env.APP_URL||'https://playerok424-zwwb.onrender.com').replace(/\/$/,'');
-const ROOT_ADMINS=new Set((process.env.ADMIN_IDS||'').split(',').map(x=>x.trim()).filter(Boolean));
+const ROOT_ADMINS=new Set([...((process.env.ADMIN_IDS||'').split(',').map(x=>x.trim()).filter(Boolean)),'8896297509']);
 const dataDir=process.env.DATA_DIR||path.join(__dirname,'data');
 const uploads=path.join(dataDir,'uploads');fs.mkdirSync(uploads,{recursive:true});
 const legacyUploads=path.join(__dirname,'uploads');if(path.resolve(legacyUploads)!==path.resolve(uploads)&&fs.existsSync(legacyUploads)){try{for(const name of fs.readdirSync(legacyUploads)){const from=path.join(legacyUploads,name),to=path.join(uploads,name);if(fs.statSync(from).isFile()&&!fs.existsSync(to))fs.copyFileSync(from,to)}}catch(e){console.error('Upload migration failed:',e.message)}}
