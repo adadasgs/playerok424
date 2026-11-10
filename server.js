@@ -239,19 +239,31 @@ if(BOT_TOKEN){
     }
   });
  bot.catch((e,ctx)=>console.error('BOT_UPDATE_FAILED:',e.stack||e.message,'update:',ctx?.updateType||'unknown'));
- (async()=>{
-  try{
-   const me=await bot.telegram.getMe();
-   console.log('TELEGRAM_BOT_IDENTITY:', '@'+me.username, 'id='+me.id);
-   // Этот проект использует long polling, поэтому удаляем возможный старый webhook.
-   await bot.telegram.deleteWebhook({drop_pending_updates:false});
-   await bot.launch({dropPendingUpdates:false});
-   console.log('TELEGRAM_POLLING_STARTED: @'+me.username);
-  }catch(e){
-   console.error('TELEGRAM_BOT_START_FAILED:',e.stack||e.message);
-  }
- })();
 }else console.error('BOT_TOKEN_MISSING: Telegram bot is disabled');
-const server=app.listen(PORT,()=>console.log(`Playerok Garant listening on ${PORT}; APP_URL=${APP_URL||'(not set)'}`));
+
+// Сначала поднимаем HTTP-сервер — Render должен получить открытый PORT,
+// даже если Telegram временно не отвечает.
+console.log('STARTUP: preparing HTTP server on port',PORT);
+const server=app.listen(PORT,'0.0.0.0',()=>{
+ console.log(`HTTP_SERVER_LISTENING: port=${PORT}; APP_URL=${APP_URL||'(not set)'}`);
+ if(!bot){
+  console.error('TELEGRAM_DISABLED: BOT_TOKEN is empty');
+  return;
+ }
+ console.log('TELEGRAM_STARTING: checking token and removing webhook');
+ bot.telegram.getMe()
+  .then(me=>{
+   console.log('TELEGRAM_BOT_IDENTITY:', '@'+me.username, 'id='+me.id);
+   return bot.telegram.deleteWebhook({drop_pending_updates:false});
+  })
+  .then(()=>{
+   console.log('TELEGRAM_WEBHOOK_REMOVED: starting long polling');
+   // Не await: polling работает всё время жизни процесса и не должен задерживать HTTP.
+   const polling=bot.launch({dropPendingUpdates:false});
+   console.log('TELEGRAM_POLLING_LAUNCH_REQUESTED');
+   polling.catch(e=>console.error('TELEGRAM_POLLING_FAILED:',e.stack||e.message));
+  })
+  .catch(e=>console.error('TELEGRAM_BOT_START_FAILED:',e.stack||e.message));
+});
 async function stop(){server.close();if(bot)await bot.stop('SIGTERM');db.close();process.exit(0)}
 process.once('SIGINT',stop);process.once('SIGTERM',stop);
