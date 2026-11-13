@@ -221,6 +221,7 @@ if(BOT_TOKEN){
   const creator=db.prepare('SELECT telegram_id FROM users WHERE id=?').get(d.creator_id);notify(creator?.telegram_id,`❌ Пользователь отклонил приглашение по сделке ${d.code}.`);
  });
  bot.start(async ctx=>{
+    console.log('START_RECEIVED:', 'from_id='+ctx.from?.id, 'chat_id='+ctx.chat?.id, 'chat_type='+ctx.chat?.type, 'username=@'+(ctx.from?.username||''));
     try{
       ensureUser(ctx.from);
       if(!APP_URL||!/^https:\/\//.test(APP_URL)){
